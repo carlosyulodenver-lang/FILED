@@ -23,6 +23,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.text.DateFormat
@@ -135,6 +136,7 @@ class MainActivity : AppCompatActivity() {
         btn("Add Folder") { pickFolder.launch(null) }
         btn("Browse Sources (Explorer)") { explore(false, HOME) { srcs = (srcs + it).distinct(); refresh() } }
         btn("Review / Remove Sources") { reviewSources() }
+        btn("Source Templates (save / load)") { templatesClick() }
         root.addView(sel)
 
         label("Destination folder")
@@ -226,6 +228,65 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Remove selected") { _, _ -> srcs = srcs.filterIndexed { i, _ -> !checked[i] }; refresh() }
             .setNeutralButton("Clear all") { _, _ -> srcs = emptyList(); refresh() }
             .setNegativeButton("Close", null).show()
+    }
+
+
+    // ---- Source templates: named, saved sets of sources that can be reloaded later ----
+    private fun loadTemplates(): JSONObject = runCatching { JSONObject(prefs.getString("templates", "{}")!!) }.getOrDefault(JSONObject())
+
+    private fun storeTemplates(t: JSONObject) { prefs.edit().putString("templates", t.toString()).apply() }
+
+    private fun templateSources(t: JSONObject, name: String): List<String> =
+        t.optJSONArray(name)?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+
+    private fun templatesClick() {
+        val t = loadTemplates()
+        val names = t.keys().asSequence().toList().sortedBy { it.lowercase() }
+        val b = AlertDialog.Builder(this).setTitle("Source templates")
+            .setPositiveButton("Save current as new") { _, _ -> saveTemplate() }
+            .setNegativeButton("Close", null)
+        if (names.isEmpty()) b.setMessage("No templates yet. Add your sources, then tap \"Save current as new\".")
+        else b.setItems(names.map { "$it  (${templateSources(t, it).size} item(s))" }.toTypedArray()) { _, i -> templateMenu(names[i]) }
+        b.show()
+    }
+
+    private fun saveTemplate() {
+        if (srcs.isEmpty()) return toast("Add some sources first")
+        val et = EditText(this).apply { hint = "Template name"; setSingleLine() }
+        AlertDialog.Builder(this).setTitle("Save sources as template").setView(et)
+            .setPositiveButton("Save") { _, _ ->
+                val name = et.text.toString().trim()
+                if (name.isEmpty()) return@setPositiveButton toast("Enter a name")
+                if (loadTemplates().has(name)) {
+                    AlertDialog.Builder(this).setMessage("A template named \"$name\" exists. Overwrite it?")
+                        .setPositiveButton("Overwrite") { _, _ -> putTemplate(name) }
+                        .setNegativeButton("Cancel", null).show()
+                } else putTemplate(name)
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun putTemplate(name: String) {
+        // keep read access to picked items so the template still works after the app restarts
+        srcs.filter { !it.startsWith("/") }.forEach {
+            runCatching { contentResolver.takePersistableUriPermission(Uri.parse(it), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
+        storeTemplates(loadTemplates().put(name, JSONArray(srcs)))
+        toast("Template \"$name\" saved")
+    }
+
+    private fun templateMenu(name: String) {
+        val list = templateSources(loadTemplates(), name)
+        AlertDialog.Builder(this).setTitle(name)
+            .setItems(arrayOf("Load (replace current sources)", "Load (add to current sources)", "Overwrite with current sources", "Delete template")) { _, w ->
+                when (w) {
+                    0 -> { srcs = list.distinct(); refresh(); toast("Loaded \"$name\"") }
+                    1 -> { srcs = (srcs + list).distinct(); refresh(); toast("Added \"$name\"") }
+                    2 -> if (srcs.isEmpty()) toast("Add some sources first") else putTemplate(name)
+                    else -> AlertDialog.Builder(this).setMessage("Delete template \"$name\"?")
+                        .setPositiveButton("Delete") { _, _ -> storeTemplates(loadTemplates().apply { remove(name) }); toast("Template deleted") }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            }.setNegativeButton("Back", null).show()
     }
 
     private fun friendly(l: String) = if (l.startsWith("/")) l else Uri.parse(l).lastPathSegment ?: l
